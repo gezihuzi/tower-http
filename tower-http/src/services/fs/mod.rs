@@ -23,6 +23,8 @@ pub use self::{
         // The response body and future are used for both ServeDir and ServeFile
         ResponseBody as ServeFileSystemResponseBody,
         ServeDir,
+        ServeDynDir,
+        ServeDynDirProvider,
     },
     serve_file::ServeFile,
 };

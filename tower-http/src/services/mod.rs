@@ -18,4 +18,4 @@ pub mod fs;
 
 #[cfg(feature = "fs")]
 #[doc(inline)]
-pub use self::fs::{ServeDir, ServeFile};
+pub use self::fs::{ServeDir, ServeFile, ServeDynDir, ServeDynDirProvider};
