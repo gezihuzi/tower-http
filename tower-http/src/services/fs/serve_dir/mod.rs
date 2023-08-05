@@ -13,7 +13,7 @@ use std::{
     fmt::Debug,
     io,
     path::{Component, Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     task::{Context, Poll},
 };
 use tower_service::Service;
@@ -594,12 +594,12 @@ pub struct ServeDynDir<F = DefaultServeDirFallback> {
     precompressed_variants: Option<PrecompressedVariants>,
     fallback: Option<F>,
     call_fallback_on_method_not_allowed: bool,
-    provider: Arc<Mutex<dyn ServeDynDirProvider>>,
+    provider: Arc<RwLock<dyn ServeDynDirProvider>>,
 }
 
 impl ServeDynDir<DefaultServeDirFallback> {
     /// Create a new [`ServeDynDir`].
-    pub fn new(provider: Arc<Mutex<dyn ServeDynDirProvider>>) -> Self {
+    pub fn new(provider: Arc<RwLock<dyn ServeDynDirProvider>>) -> Self {
         Self {
             buf_chunk_size: DEFAULT_CAPACITY,
             precompressed_variants: None,
@@ -871,7 +871,7 @@ impl<F> ServeDynDir<F> {
         });
 
         let provider = Arc::clone(&self.provider);
-        let path = match provider.lock().unwrap().get_path(&req) {
+        let path = match provider.read().unwrap().get_path(&req) {
             Some(temp) => temp.to_owned(),
             None => {
                 return ResponseFuture::invalid_path(fallback_and_request);
