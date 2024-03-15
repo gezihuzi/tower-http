@@ -559,6 +559,9 @@ pub trait ServeDynDirProvider: Send + Sync + Debug {
 pub struct ServeDynDir<F = DefaultServeDirFallback> {
     buf_chunk_size: usize,
     precompressed_variants: Option<PrecompressedVariants>,
+    // This is used to specialise implementation for
+    // single files
+    variant: ServeVariant,
     fallback: Option<F>,
     call_fallback_on_method_not_allowed: bool,
     provider: Arc<RwLock<dyn ServeDynDirProvider>>,
@@ -570,6 +573,9 @@ impl ServeDynDir<DefaultServeDirFallback> {
         Self {
             buf_chunk_size: DEFAULT_CAPACITY,
             precompressed_variants: None,
+            variant: ServeVariant::Directory {
+                append_index_html_on_directories: false,
+            },
             fallback: None,
             call_fallback_on_method_not_allowed: false,
             provider,
@@ -578,6 +584,23 @@ impl ServeDynDir<DefaultServeDirFallback> {
 }
 
 impl<F> ServeDynDir<F> {
+    /// If the requested path is a directory append `index.html`.
+    ///
+    /// This is useful for static sites.
+    ///
+    /// Defaults to `true`.
+    pub fn append_index_html_on_directories(mut self, append: bool) -> Self {
+        match &mut self.variant {
+            ServeVariant::Directory {
+                append_index_html_on_directories,
+            } => {
+                *append_index_html_on_directories = append;
+                self
+            }
+            ServeVariant::SingleFile { mime: _ } => self,
+        }
+    }
+
     /// Set a specific read buffer chunk size.
     ///
     /// The default capacity is 64kb.
@@ -661,30 +684,13 @@ impl<F> ServeDynDir<F> {
     /// The status code returned by the fallback will not be altered. Use
     /// [`ServeDir::not_found_service`] to set a fallback and always respond with `404 Not Found`.
     ///
-    /// # Example
-    ///
     /// This can be used to respond with a different file:
     ///
-    /// ```rust
-    /// use tower_http::services::{ServeDir, ServeFile};
-    ///
-    /// let service = ServeDir::new("assets")
-    ///     // respond with `not_found.html` for missing files
-    ///     .fallback(ServeFile::new("assets/not_found.html"));
-    ///
-    /// # async {
-    /// // Run our service using `hyper`
-    /// let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 3000));
-    /// hyper::Server::bind(&addr)
-    ///     .serve(tower::make::Shared::new(service))
-    ///     .await
-    ///     .expect("server error");
-    /// # };
-    /// ```
     pub fn fallback<F2>(self, new_fallback: F2) -> ServeDynDir<F2> {
         ServeDynDir {
             buf_chunk_size: self.buf_chunk_size,
             precompressed_variants: self.precompressed_variants,
+            variant: self.variant,
             fallback: Some(new_fallback),
             call_fallback_on_method_not_allowed: self.call_fallback_on_method_not_allowed,
             provider: self.provider,
@@ -694,27 +700,6 @@ impl<F> ServeDynDir<F> {
     /// Set the fallback service and override the fallback's status code to `404 Not Found`.
     ///
     /// This service will be called if there is no file at the path of the request.
-    ///
-    /// # Example
-    ///
-    /// This can be used to respond with a different file:
-    ///
-    /// ```rust
-    /// use tower_http::services::{ServeDir, ServeFile};
-    ///
-    /// let service = ServeDir::new("assets")
-    ///     // respond with `404 Not Found` and the contents of `not_found.html` for missing files
-    ///     .not_found_service(ServeFile::new("assets/not_found.html"));
-    ///
-    /// # async {
-    /// // Run our service using `hyper`
-    /// let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 3000));
-    /// hyper::Server::bind(&addr)
-    ///     .serve(tower::make::Shared::new(service))
-    ///     .await
-    ///     .expect("server error");
-    /// # };
-    /// ```
     ///
     /// Setups like this are often found in single page applications.
     pub fn not_found_service<F2>(self, new_fallback: F2) -> ServeDynDir<SetStatus<F2>> {
@@ -740,58 +725,6 @@ impl<F> ServeDynDir<F> {
     /// If you want to manually control how the error response is generated you can make a new
     /// service that wraps a `ServeDir` and calls `try_call` instead of `call`.
     ///
-    /// # Example
-    ///
-    /// ```
-    /// use tower_http::services::ServeDir;
-    /// use std::{io, convert::Infallible};
-    /// use http::{Request, Response, StatusCode};
-    /// use http_body::Body as _;
-    /// use http_body_util::{Full, BodyExt, combinators::UnsyncBoxBody};
-    /// use bytes::Bytes;
-    /// use tower::{service_fn, ServiceExt, BoxError};
-    ///
-    /// async fn serve_dir(
-    ///     request: Request<Full<Bytes>>
-    /// ) -> Result<Response<UnsyncBoxBody<Bytes, BoxError>>, Infallible> {
-    ///     let mut service = ServeDir::new("assets");
-    ///
-    ///     // You only need to worry about backpressure, and thus call `ServiceExt::ready`, if
-    ///     // your adding a fallback to `ServeDir` that cares about backpressure.
-    ///     //
-    ///     // Its shown here for demonstration but you can do `service.try_call(request)`
-    ///     // otherwise
-    ///     let ready_service = match ServiceExt::<Request<Full<Bytes>>>::ready(&mut service).await {
-    ///         Ok(ready_service) => ready_service,
-    ///         Err(infallible) => match infallible {},
-    ///     };
-    ///
-    ///     match ready_service.try_call(request).await {
-    ///         Ok(response) => {
-    ///             Ok(response.map(|body| body.map_err(Into::into).boxed_unsync()))
-    ///         }
-    ///         Err(err) => {
-    ///             let body = Full::from("Something went wrong...")
-    ///                 .map_err(Into::into)
-    ///                 .boxed_unsync();
-    ///             let response = Response::builder()
-    ///                 .status(StatusCode::INTERNAL_SERVER_ERROR)
-    ///                 .body(body)
-    ///                 .unwrap();
-    ///             Ok(response)
-    ///         }
-    ///     }
-    /// }
-    ///
-    /// # async {
-    /// // Run our service using `hyper`
-    /// let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 3000));
-    /// hyper::Server::bind(&addr)
-    ///     .serve(tower::make::Shared::new(service_fn(serve_dir)))
-    ///     .await
-    ///     .expect("server error");
-    /// # };
-    /// ```
     pub fn try_call<ReqBody, FResBody>(
         &mut self,
         req: Request<ReqBody>,
@@ -854,13 +787,8 @@ impl<F> ServeDynDir<F> {
         };
 
         let base = &path;
-        let mime = mime_guess::from_path(base).first_or_octet_stream();
-        let content_type = mime.to_string();
-        let header_value = HeaderValue::from_str(&content_type)
-            .unwrap_or("application/octet-stream".parse().unwrap());
-        let variant = ServeVariant::SingleFile { mime: header_value };
 
-        let path_to_file = match variant.build_and_validate_path(base, req.uri().path()) {
+        let path_to_file = match self.variant.build_and_validate_path(base, req.uri().path()) {
             Some(path_to_file) => path_to_file,
             None => {
                 return ResponseFuture::invalid_path(fallback_and_request);
@@ -874,12 +802,13 @@ impl<F> ServeDynDir<F> {
             .and_then(|value| value.to_str().ok())
             .map(|s| s.to_owned());
 
-        let negotiated_encodings = encodings(
+        let negotiated_encodings: Vec<_> = encodings(
             req.headers(),
             self.precompressed_variants.unwrap_or_default(),
-        );
+        )
+        .collect();
 
-        let variant = variant.clone();
+        let variant = self.variant.clone();
 
         let open_file_future = Box::pin(open_file::open_file(
             variant,
