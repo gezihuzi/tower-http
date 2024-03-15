@@ -61,7 +61,9 @@ impl Encoding {
     ))]
     fn parse(s: &str, _supported_encoding: impl SupportedEncodings) -> Option<Encoding> {
         #[cfg(any(feature = "fs", feature = "compression-gzip"))]
-        if s.eq_ignore_ascii_case("gzip") && _supported_encoding.gzip() {
+        if (s.eq_ignore_ascii_case("gzip") || s.eq_ignore_ascii_case("x-gzip"))
+            && _supported_encoding.gzip()
+        {
             return Some(Encoding::Gzip);
         }
 
@@ -98,7 +100,7 @@ impl Encoding {
         headers: &http::HeaderMap,
         supported_encoding: impl SupportedEncodings,
     ) -> Self {
-        Encoding::preferred_encoding(&encodings(headers, supported_encoding))
+        Encoding::preferred_encoding(encodings(headers, supported_encoding))
             .unwrap_or(Encoding::Identity)
     }
 
@@ -109,12 +111,13 @@ impl Encoding {
         feature = "compression-deflate",
         feature = "fs",
     ))]
-    pub(crate) fn preferred_encoding(accepted_encodings: &[(Encoding, QValue)]) -> Option<Self> {
+    pub(crate) fn preferred_encoding(
+        accepted_encodings: impl Iterator<Item = (Encoding, QValue)>,
+    ) -> Option<Self> {
         accepted_encodings
-            .iter()
             .filter(|(_, qvalue)| qvalue.0 > 0)
-            .max_by_key(|(encoding, qvalue)| (qvalue, encoding))
-            .map(|(encoding, _)| *encoding)
+            .max_by_key(|&(encoding, qvalue)| (qvalue, encoding))
+            .map(|(encoding, _)| encoding)
     }
 }
 
@@ -210,16 +213,16 @@ impl QValue {
     feature = "fs",
 ))]
 // based on https://github.com/http-rs/accept-encoding
-pub(crate) fn encodings(
-    headers: &http::HeaderMap,
-    supported_encoding: impl SupportedEncodings,
-) -> Vec<(Encoding, QValue)> {
+pub(crate) fn encodings<'a>(
+    headers: &'a http::HeaderMap,
+    supported_encoding: impl SupportedEncodings + 'a,
+) -> impl Iterator<Item = (Encoding, QValue)> + 'a {
     headers
         .get_all(http::header::ACCEPT_ENCODING)
         .iter()
         .filter_map(|hval| hval.to_str().ok())
         .flat_map(|s| s.split(','))
-        .filter_map(|v| {
+        .filter_map(move |v| {
             let mut v = v.splitn(2, ';');
 
             let encoding = match Encoding::parse(v.next().unwrap().trim(), supported_encoding) {
@@ -235,7 +238,6 @@ pub(crate) fn encodings(
 
             Some((encoding, qval))
         })
-        .collect::<Vec<(Encoding, QValue)>>()
 }
 
 #[cfg(all(
@@ -295,6 +297,28 @@ mod tests {
         );
         let encoding = Encoding::from_headers(&headers, SupportedEncodingsAll);
         assert_eq!(Encoding::Brotli, encoding);
+    }
+
+    #[test]
+    fn accept_encoding_header_gzip_x_gzip() {
+        let mut headers = http::HeaderMap::new();
+        headers.append(
+            http::header::ACCEPT_ENCODING,
+            http::HeaderValue::from_static("gzip,x-gzip"),
+        );
+        let encoding = Encoding::from_headers(&headers, SupportedEncodingsAll);
+        assert_eq!(Encoding::Gzip, encoding);
+    }
+
+    #[test]
+    fn accept_encoding_header_x_gzip_deflate() {
+        let mut headers = http::HeaderMap::new();
+        headers.append(
+            http::header::ACCEPT_ENCODING,
+            http::HeaderValue::from_static("deflate,x-gzip"),
+        );
+        let encoding = Encoding::from_headers(&headers, SupportedEncodingsAll);
+        assert_eq!(Encoding::Gzip, encoding);
     }
 
     #[test]

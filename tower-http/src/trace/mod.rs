@@ -400,7 +400,16 @@ pub use self::{
     on_response::{DefaultOnResponse, OnResponse},
     service::Trace,
 };
-use crate::LatencyUnit;
+use crate::{
+    classify::{GrpcErrorsAsFailures, ServerErrorsAsFailures, SharedClassifier},
+    LatencyUnit,
+};
+
+/// MakeClassifier for HTTP requests.
+pub type HttpMakeClassifier = SharedClassifier<ServerErrorsAsFailures>;
+
+/// MakeClassifier for gRPC requests.
+pub type GrpcMakeClassifier = SharedClassifier<GrpcErrorsAsFailures>;
 
 macro_rules! event_dynamic_lvl {
     ( $(target: $target:expr,)? $(parent: $parent:expr,)? $lvl:expr, $($tt:tt)* ) => {
@@ -507,7 +516,7 @@ mod tests {
                 tracing::info_span!("test-span", foo = tracing::field::Empty)
             })
             .on_request(|_req: &Request<Body>, span: &Span| {
-                span.record("foo", 42);
+                span.record("foo", &42);
                 ON_REQUEST_COUNT.fetch_add(1, Ordering::SeqCst);
             })
             .on_response(|_res: &Response<Body>, _latency: Duration, _span: &Span| {
