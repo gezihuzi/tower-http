@@ -14,7 +14,7 @@ use std::{
     fmt::Debug,
     io,
     path::{Component, Path, PathBuf},
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, RwLock},
     task::{Context, Poll},
 };
 use tower_service::Service;
@@ -546,7 +546,7 @@ pub trait ServeDynDirProvider: Send + Sync + Debug {
     /// Returns a path to serve given an HTTP request.
     ///
     /// The implementation should return `None` if no path can be found for the given request.
-    fn get_path(&self, req: &Request<Empty<Bytes>>) -> Option<String>;
+    fn get_path(&self, req: &Request<Empty<Bytes>>) -> Option<PathBuf>;
 }
 
 /// A struct for serving dynamically generated directories.
@@ -745,13 +745,13 @@ impl<F> ServeDynDir<F> {
     /// use tower_http::services::ServeDir;
     /// use std::{io, convert::Infallible};
     /// use http::{Request, Response, StatusCode};
-    /// use http_body::{combinators::UnsyncBoxBody, Body as _};
-    /// use hyper::Body;
+    /// use http_body::Body as _;
+    /// use http_body_util::{Full, BodyExt, combinators::UnsyncBoxBody};
     /// use bytes::Bytes;
     /// use tower::{service_fn, ServiceExt, BoxError};
     ///
     /// async fn serve_dir(
-    ///     request: Request<Body>
+    ///     request: Request<Full<Bytes>>
     /// ) -> Result<Response<UnsyncBoxBody<Bytes, BoxError>>, Infallible> {
     ///     let mut service = ServeDir::new("assets");
     ///
@@ -760,7 +760,7 @@ impl<F> ServeDynDir<F> {
     ///     //
     ///     // Its shown here for demonstration but you can do `service.try_call(request)`
     ///     // otherwise
-    ///     let ready_service = match ServiceExt::<Request<Body>>::ready(&mut service).await {
+    ///     let ready_service = match ServiceExt::<Request<Full<Bytes>>>::ready(&mut service).await {
     ///         Ok(ready_service) => ready_service,
     ///         Err(infallible) => match infallible {},
     ///     };
@@ -770,7 +770,7 @@ impl<F> ServeDynDir<F> {
     ///             Ok(response.map(|body| body.map_err(Into::into).boxed_unsync()))
     ///         }
     ///         Err(err) => {
-    ///             let body = Body::from("Something went wrong...")
+    ///             let body = Full::from("Something went wrong...")
     ///                 .map_err(Into::into)
     ///                 .boxed_unsync();
     ///             let response = Response::builder()
@@ -836,16 +836,24 @@ impl<F> ServeDynDir<F> {
             (fallback, fallback_req)
         });
 
-        let provider = Arc::clone(&self.provider);
-        let path = match provider.read().unwrap().get_path(&req) {
-            Some(temp) => temp.to_owned(),
-            None => {
+        let provider = self.provider.clone();
+        let path = match provider.try_read() {
+            Ok(provider) => {
+                let path = provider.get_path(&req);
+                match path {
+                    Some(path) => path,
+                    None => {
+                        return ResponseFuture::invalid_path(fallback_and_request);
+                    }
+                }
+            }
+            Err(_) => {
                 return ResponseFuture::invalid_path(fallback_and_request);
             }
         };
 
-        let base = Path::new(&path);
-        let mime = mime_guess::from_path(&base).first_or_octet_stream();
+        let base = &path;
+        let mime = mime_guess::from_path(base).first_or_octet_stream();
         let content_type = mime.to_string();
         let header_value = HeaderValue::from_str(&content_type)
             .unwrap_or("application/octet-stream".parse().unwrap());
@@ -912,8 +920,9 @@ where
                 let response = result.unwrap_or_else(|err| {
                     tracing::error!(error = %err, "Failed to read file");
 
-                    let body =
-                        ResponseBody::new(Empty::new().map_err(|err| match err {}).boxed_unsync());
+                    let body = ResponseBody::new(UnsyncBoxBody::new(
+                        Empty::new().map_err(|err| match err {}).boxed_unsync(),
+                    ));
                     Response::builder()
                         .status(StatusCode::INTERNAL_SERVER_ERROR)
                         .body(body)
